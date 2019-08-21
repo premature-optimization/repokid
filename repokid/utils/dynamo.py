@@ -176,6 +176,7 @@ def get_role_data(dynamo_table, roleID, fields=None):
         response = dynamo_table.get_item(Key={'RoleId': roleID})
 
     if response and 'Item' in response:
+        #print('This is the dict for role {}'.format(_empty_string_from_dynamo_replace(response['Item'])))
         return _empty_string_from_dynamo_replace(response['Item'])
 
 
@@ -276,6 +277,7 @@ def store_initial_role_data(dynamo_table, arn, create_date, role_id, role_name, 
     store_dynamo = copy.copy(role_dict)
 
     dynamo_table.put_item(Item=_empty_string_to_dynamo_replace(store_dynamo))
+    print('PUTITEM {}'.format(Item=_empty_string_to_dynamo_replace(store_dynamo)))
     # we want to store CreateDate as a string but keep it as a datetime, so put it back here
     role_dict['CreateDate'] = create_date
     return role_dict

@@ -46,7 +46,7 @@ import time
 
 import botocore
 from cloudaux.aws.iam import (delete_role_policy, get_account_authorization_details, get_role_inline_policies,
-                              put_role_policy)
+                              get_role_managed_policies, put_role_policy)
 from cloudaux.aws.sts import sts_conn
 from docopt import docopt
 import import_string
@@ -81,8 +81,6 @@ def _generate_default_config(filename=None):
         dict: Template for Repokid config as a dictionary
     """
     config_dict = {
-        "query_role_data_in_batch": False,
-        "batch_processing_size": 100,
         "filter_config": {
             "AgeFilter": {
                 "minimum_age": 90
@@ -298,20 +296,22 @@ def _update_role_data(role, dynamo_table, account_number, config, conn, hooks, s
     Returns:
         None
     """
-    current_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_policies = {}
+    current_inline_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_managed_policies = get_role_managed_policies(role.as_dict(), **conn) or {}
+    current_policies.update(current_inline_policies)
+    current_policies.update(current_managed_policies)
     roledata.update_role_data(dynamo_table, account_number, role, current_policies, source=source,
                               add_no_repo=add_no_repo)
+    print('Updated {} role, current_policies &&&*&*&*& \n {}'.format(role, current_policies))
+    print('Managed pollicies are &&^&^&^&^& {}'.format(current_managed_policies))
     aardvark_data = _get_aardvark_data(config['aardvark_api_location'], arn=role.arn)
 
     if not aardvark_data:
         return
 
-    batch_processing = config.get("query_role_data_in_batch", False)
-    batch_size = config.get("batch_processing_size", 100)
-
     role.aa_data = aardvark_data[role.arn]
-    roledata._calculate_repo_scores([role], config['filter_config']['AgeFilter']
-                                    ['minimum_age'], hooks, batch_processing, batch_size)
+    roledata._calculate_repo_scores([role], config['filter_config']['AgeFilter']['minimum_age'], hooks)
     set_role_data(dynamo_table, role.role_id, {'AAData': role.aa_data,
                                                'TotalPermissions': role.total_permissions,
                                                'RepoablePermissions': role.repoable_permissions,
@@ -325,7 +325,6 @@ class FilterPlugins(object):
     FilterPlugins is used to hold a list of instantiated plugins. The internal object filter_plugins contains a list
     of active plugins that can be iterated.
     """
-
     def __init__(self):
         """Initialize empty list"""
         self.filter_plugins = []
@@ -349,7 +348,6 @@ class FilterPlugins(object):
 
 class Filter(object):
     """Base class for filter plugins to inherit.  Passes config if supplied and requires the apply method be defined"""
-
     def __init__(self, config=None):
         self.config = config
 
@@ -446,11 +444,7 @@ def update_role_cache(account_number, dynamo_table, config, hooks):
             set_role_data(dynamo_table, role.role_id, {'AAData': role.aa_data})
 
     LOGGER.info('Calculating repoable permissions and services for account {}'.format(account_number))
-
-    batch_processing = config.get("query_role_data_in_batch", False)
-    batch_size = config.get("batch_processing_size", 100)
-    roledata._calculate_repo_scores(roles, config['filter_config']['AgeFilter']
-                                    ['minimum_age'], hooks, batch_processing, batch_size)
+    roledata._calculate_repo_scores(roles, config['filter_config']['AgeFilter']['minimum_age'], hooks)
     for role in roles:
         LOGGER.debug('Role {} in account {} has\nrepoable permissions: {}\nrepoable services:'.format(
             role.role_name, account_number, role.repoable_permissions, role.repoable_services
@@ -480,12 +474,13 @@ def display_roles(account_number, dynamo_table, inactive=False):
     rows = list()
 
     roles = Roles([Role(get_role_data(dynamo_table, roleID))
-                   for roleID in tqdm(role_ids_for_account(dynamo_table, account_number))])
+                  for roleID in tqdm(role_ids_for_account(dynamo_table, account_number))])
 
     if not inactive:
         roles = roles.filter(active=True)
 
     for role in roles:
+        print('Appending for role {}, {}'.format(role, role.total_permissions))
         rows.append([role.role_name,
                      role.refreshed,
                      role.disqualified_by,
@@ -645,7 +640,7 @@ def schedule_repo(account_number, dynamo_table, config, hooks):
     scheduled_roles = []
 
     roles = Roles([Role(get_role_data(dynamo_table, roleID))
-                   for roleID in tqdm(role_ids_for_account(dynamo_table, account_number))])
+                  for roleID in tqdm(role_ids_for_account(dynamo_table, account_number))])
 
     scheduled_time = int(time.time()) + (86400 * config.get('repo_schedule_period_days', 7))
     for role in roles:
@@ -670,7 +665,7 @@ def show_scheduled_roles(account_number, dynamo_table):
     Show scheduled repos for a given account.  For each scheduled show whether scheduled time is elapsed or not.
     """
     roles = Roles([Role(get_role_data(dynamo_table, roleID))
-                   for roleID in tqdm(role_ids_for_account(dynamo_table, account_number))])
+                  for roleID in tqdm(role_ids_for_account(dynamo_table, account_number))])
 
     # filter to show only roles that are scheduled
     roles = roles.filter(active=True)
@@ -699,7 +694,7 @@ def cancel_scheduled_repo(account_number, dynamo_table, role_name=None, is_all=N
 
     if is_all:
         roles = Roles([Role(get_role_data(dynamo_table, roleID))
-                       for roleID in role_ids_for_account(dynamo_table, account_number)])
+                      for roleID in role_ids_for_account(dynamo_table, account_number)])
 
         # filter to show only roles that are scheduled
         roles = [role for role in roles if (role.repo_scheduled)]
@@ -723,7 +718,7 @@ def cancel_scheduled_repo(account_number, dynamo_table, role_name=None, is_all=N
 
     set_role_data(dynamo_table, role.role_id, {'RepoScheduled': 0, 'ScheduledPerms': []})
     LOGGER.info('Successfully cancelled scheduled repo for role {} in account {}'.format(role.role_name,
-                                                                                         role.account))
+                role.account))
 
 
 def _inline_policies_size_exceeds_maximum(policies):
@@ -888,7 +883,11 @@ def _remove_permissions_from_role(account_number, permissions, role, role_id, dy
         if error:
             LOGGER.error(error)
 
-    current_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_policies = {}
+    current_inline_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_managed_policies = get_role_managed_policies(role.as_dict(), **conn) or {}
+    current_policies.update(current_inline_policies)
+    current_policies.update(current_managed_policies)
     roledata.add_new_policy_version(dynamo_table, role, current_policies, 'Repo')
 
     set_role_data(dynamo_table, role.role_id, {'Repoed': datetime.datetime.utcnow().isoformat()})
@@ -1002,7 +1001,11 @@ def repo_role(account_number, role_name, dynamo_table, config, hooks, commit=Fal
             LOGGER.error(error)
             errors.append(error)
 
-    current_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_policies = {}
+    current_inline_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_managed_policies = get_role_managed_policies(role.as_dict(), **conn) or {}
+    current_policies.update(current_inline_policies)
+    current_policies.update(current_managed_policies)
     roledata.add_new_policy_version(dynamo_table, role, current_policies, 'Repo')
 
     # regardless of whether we're successful we want to unschedule the repo
@@ -1051,16 +1054,20 @@ def rollback_role(account_number, role_name, dynamo_table, config, hooks, select
         for index, policies_version in enumerate(role.policies):
             policy_permissions, _ = roledata._get_permissions_in_policy(policies_version['Policy'])
             rows.append([index, policies_version['Source'], policies_version['Discovered'],
-                         len(policy_permissions),
-                         roledata._get_services_in_permissions(policy_permissions)])
+                        len(policy_permissions),
+                        roledata._get_services_in_permissions(policy_permissions)])
         print tabulate(rows, headers=headers)
         return
 
     conn = config['connection_iam']
     conn['account_number'] = account_number
 
-    current_policies = get_role_inline_policies(role.as_dict(), **conn)
-
+    current_policies = {}
+    current_inline_policies = get_role_inline_policies(role.as_dict(), **conn) or {}
+    current_managed_policies = get_role_managed_policies(role.as_dict(), **conn) or {}
+    current_policies.update(current_inline_policies)
+    current_policies.update(current_managed_policies)
+    
     if selection:
         pp = pprint.PrettyPrinter()
 
